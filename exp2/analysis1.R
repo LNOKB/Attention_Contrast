@@ -64,27 +64,27 @@ dat_detect_reshaped <- dat_detect %>%
       reshape_trial_data()
   })
 
-write_csv(dat_detect_reshaped, "dat_detect_reshaped.csv")
+write_csv(dat_detect_reshaped, "dat_detect.csv")
 
-#################dat_comp後でやる。下は回らない
-# dat_comp <- files[str_detect(basename(files), "_comp_")] |>
-#   lapply(read_csv, show_col_types = FALSE) |>
-#   bind_rows() |>
-#   mutate(
-#     cuetype = case_when(
-#       precue == 0 ~ 0,
-#       precue == side ~ 1,
-#       precue != 0 & precue != side ~ -1,
-#       TRUE ~ NA_real_
-#     ),
-#     
-#     select_test = case_when(
-#       key_resp.keys == "left"  & side == -1 ~ 1,
-#       key_resp.keys == "left"  & side ==  1 ~ 0,
-#       key_resp.keys == "right" & side == -1 ~ 0,
-#       key_resp.keys == "right" & side ==  1 ~ 1,
-#       TRUE ~ NA_real_
-#     )
-#   )
-# 
-# write.csv(dat_comp, "dat_comp.csv", row.names = FALSE)
+#################
+dat_comp <- files[str_detect(basename(files), "_comp_")] |>
+  lapply(read_csv, show_col_types = FALSE) |>
+  bind_rows() |>
+  mutate(
+    cuetype = case_when(
+      precue == 0 ~ 0,
+      precue == side ~ 1,
+      precue != 0 & precue != side ~ -1,
+      TRUE ~ NA_real_
+    ),
+
+    select_test = case_when(
+      key_resp.keys == "left"  & side == -1 ~ 1,
+      key_resp.keys == "left"  & side ==  1 ~ 0,
+      key_resp.keys == "right" & side == -1 ~ 0,
+      key_resp.keys == "right" & side ==  1 ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
+
+write.csv(dat_comp, "dat_comp.csv", row.names = FALSE)
