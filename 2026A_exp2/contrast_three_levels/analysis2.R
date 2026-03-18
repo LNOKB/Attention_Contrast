@@ -475,3 +475,148 @@ comp_graph <- ggplot(comp_obs_group,
 plot(comp_graph)
 ggsave(file = "comp_graph.png", plot = comp_graph,
        dpi = 150, width = 14, height = 7)
+
+# ============================================================
+### d' plot for detect task
+# ============================================================
+
+contrast_levels <- c(0, 3.7, 4.9, 6.1)
+
+dprime_df <- estimates %>%
+  mutate(
+    # attended
+    dp_att_0   = (mu_attended_0   - mu_attended_0) / sigma_attended,  # = 0
+    dp_att_3.7 = (mu_attended_3.7 - mu_attended_0) / sigma_attended,  # = mu_attended_3.7
+    dp_att_4.9 = (mu_attended_4.9 - mu_attended_0) / sigma_attended,
+    dp_att_6.1 = (mu_attended_6.1 - mu_attended_0) / sigma_attended,
+    
+    # unattended
+    dp_una_0   = (mu_attended_0  　- mu_attended_0) * lambda_unattended　/ sigma_unattended,  # = 0
+    dp_una_3.7 = (mu_attended_3.7　- mu_attended_0) * lambda_unattended　/ sigma_unattended,
+    dp_una_4.9 = (mu_attended_4.9  - mu_attended_0) * lambda_unattended　/ sigma_unattended,
+    dp_una_6.1 = (mu_attended_6.1  - mu_attended_0) * lambda_unattended  / sigma_unattended
+  ) %>%
+  select(sub, starts_with("dp_")) %>%
+  pivot_longer(
+    cols          = starts_with("dp_"),
+    names_to      = c("condition", "contrast"),
+    names_pattern = "dp_(att|una)_(.*)",
+    values_to     = "dprime"
+  ) %>%
+  mutate(
+    condition = factor(ifelse(condition == "att", "attended", "unattended"),
+                       levels = c("attended", "unattended")),
+    contrast  = as.numeric(contrast)
+  )
+
+# グループ平均・SE
+dprime_group <- dprime_df %>%
+  group_by(condition, contrast) %>%
+  summarise(
+    mean_dp = mean(dprime),
+    se_dp   = sd(dprime) / sqrt(n()),
+    .groups = "drop"
+  )
+
+col_condition <- c("attended" = "#e41a1c", "unattended" = "#377eb8")
+
+# --- 図1: attended / unattended を別パネル ---
+dprime_plot_sep <- ggplot() +
+  geom_line(data  = dprime_df,
+            aes(x = contrast, y = dprime, group = sub),
+            color = "gray70", linewidth = 0.5, alpha = 0.7) +
+  geom_point(data = dprime_df,
+             aes(x = contrast, y = dprime),
+             color = "gray70", size = 1.5, alpha = 0.7) +
+  geom_errorbar(data = dprime_group,
+                aes(x = contrast, ymin = mean_dp - se_dp, ymax = mean_dp + se_dp),
+                width = 0.15, linewidth = 0.9) +
+  geom_line(data  = dprime_group,
+            aes(x = contrast, y = mean_dp),
+            linewidth = 1.5, color = "black") +
+  geom_point(data = dprime_group,
+             aes(x = contrast, y = mean_dp),
+             size = 4, color = "black") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ condition, nrow = 1) +
+  scale_x_continuous(breaks = contrast_levels,
+                     labels = c("0%", "3.7%", "4.9%", "6.1%")) +
+  labs(x = "Contrast level", y = "d'",
+       title    = "d' for detect task  (separate panels)",
+       subtitle = "Gray = individual, Black = group mean ± SE") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text       = element_text(size = 14, face = "bold"),
+        plot.title       = element_text(face = "bold"))
+
+# --- 図2: attended / unattended を同じパネルに重ねる ---
+dprime_plot_overlay <- ggplot() +
+  geom_line(data  = dprime_df,
+            aes(x = contrast, y = dprime, group = interaction(sub, condition),
+                color = condition),
+            linewidth = 0.5, alpha = 0.4) +
+  geom_point(data = dprime_df,
+             aes(x = contrast, y = dprime, color = condition),
+             size = 1.5, alpha = 0.4) +
+  geom_errorbar(data = dprime_group,
+                aes(x = contrast, ymin = mean_dp - se_dp, ymax = mean_dp + se_dp,
+                    color = condition),
+                width = 0.15, linewidth = 0.9,
+                position = position_dodge(width = 0.2)) +
+  geom_line(data  = dprime_group,
+            aes(x = contrast, y = mean_dp, color = condition),
+            linewidth = 1.5,
+            position = position_dodge(width = 0.2)) +
+  geom_point(data = dprime_group,
+             aes(x = contrast, y = mean_dp, color = condition),
+             size = 4,
+             position = position_dodge(width = 0.2)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_color_manual(values = col_condition, name = "Condition") +
+  scale_x_continuous(breaks = contrast_levels,
+                     labels = c("0%", "3.7%", "4.9%", "6.1%")) +
+  labs(x = "Contrast level", y = "d'",
+       title    = "d' for detect task  (overlaid)",
+       subtitle = "Thin = individual, Thick = group mean ± SE") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position  = "bottom",
+        plot.title       = element_text(face = "bold"))
+
+plot(dprime_plot_sep)
+plot(dprime_plot_overlay)
+ggsave(file = "dprime_separate.png",  plot = dprime_plot_sep,
+       dpi = 150, width = 10, height = 5)
+ggsave(file = "dprime_overlay.png",   plot = dprime_plot_overlay,
+       dpi = 150, width = 6,  height = 5)
+
+# --- 図3: 参加者ごとのoverlay ---
+dprime_plot_dir <- file.path(plot_dir, "dprime")
+dir.create(dprime_plot_dir, showWarnings = FALSE)
+
+for (i in seq_along(participants)) {
+  pid <- participants[i]
+  
+  d_i <- dprime_df %>% filter(sub == i)
+  
+  p_dp_i <- ggplot(d_i, aes(x = contrast, y = dprime, color = condition)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 3) +
+    scale_color_manual(values = col_condition, name = "Condition") +
+    scale_x_continuous(breaks = contrast_levels,
+                       labels = c("0%", "3.7%", "4.9%", "6.1%")) +
+    labs(x = "Contrast level", y = "d'",
+         title = paste0("Participant ", pid, "  |  d' (detect task)")) +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position  = "bottom",
+          plot.title       = element_text(face = "bold"))
+  
+  ggsave(file.path(dprime_plot_dir, sprintf("P%02d_dprime.png", pid)),
+         plot = p_dp_i, dpi = 150, width = 5, height = 4)
+}
+cat("Individual d' plots saved to:", dprime_plot_dir, "\n")
