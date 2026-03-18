@@ -620,3 +620,145 @@ for (i in seq_along(participants)) {
          plot = p_dp_i, dpi = 150, width = 5, height = 4)
 }
 cat("Individual d' plots saved to:", dprime_plot_dir, "\n")
+
+# ============================================================
+### Criterion C plot for detect task
+# c = theta_detect - (mu_signal + mu_noise) / 2
+# mu_noise = 0 (attended) or 0 * lambda (unattended) = 0
+# ============================================================
+
+criterion_df <- estimates %>%
+  mutate(
+    # attended: c = theta - (mu_att_c + 0) / 2
+    c_att_0   = theta_detect - (mu_attended_0             + mu_attended_0) / 2,
+    c_att_3.7 = theta_detect - (mu_attended_3.7           + mu_attended_0) / 2,
+    c_att_4.9 = theta_detect - (mu_attended_4.9           + mu_attended_0) / 2,
+    c_att_6.1 = theta_detect - (mu_attended_6.1           + mu_attended_0) / 2,
+    # unattended: c = theta - (mu_una_c + 0) / 2
+    c_una_0   = theta_detect - (mu_attended_0   * lambda_unattended + mu_attended_0 * lambda_unattended) / 2,
+    c_una_3.7 = theta_detect - (mu_attended_3.7 * lambda_unattended + mu_attended_0 * lambda_unattended) / 2,
+    c_una_4.9 = theta_detect - (mu_attended_4.9 * lambda_unattended + mu_attended_0 * lambda_unattended) / 2,
+    c_una_6.1 = theta_detect - (mu_attended_6.1 * lambda_unattended + mu_attended_0 * lambda_unattended) / 2
+  ) %>%
+  select(sub, starts_with("c_")) %>%
+  pivot_longer(
+    cols          = starts_with("c_"),
+    names_to      = c("condition", "contrast"),
+    names_pattern = "c_(att|una)_(.*)",
+    values_to     = "criterion"
+  ) %>%
+  mutate(
+    condition = factor(ifelse(condition == "att", "attended", "unattended"),
+                       levels = c("attended", "unattended")),
+    contrast  = as.numeric(contrast)
+  )
+
+# グループ平均・SE
+criterion_group <- criterion_df %>%
+  group_by(condition, contrast) %>%
+  summarise(
+    mean_c = mean(criterion),
+    se_c   = sd(criterion) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# --- 図1: 別パネル ---
+criterion_plot_sep <- ggplot() +
+  geom_line(data  = criterion_df,
+            aes(x = contrast, y = criterion, group = sub),
+            color = "gray70", linewidth = 0.5, alpha = 0.7) +
+  geom_point(data = criterion_df,
+             aes(x = contrast, y = criterion),
+             color = "gray70", size = 1.5, alpha = 0.7) +
+  geom_errorbar(data = criterion_group,
+                aes(x = contrast, ymin = mean_c - se_c, ymax = mean_c + se_c),
+                width = 0.15, linewidth = 0.9) +
+  geom_line(data  = criterion_group,
+            aes(x = contrast, y = mean_c),
+            linewidth = 1.5, color = "black") +
+  geom_point(data = criterion_group,
+             aes(x = contrast, y = mean_c),
+             size = 4, color = "black") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ condition, nrow = 1) +
+  scale_x_continuous(breaks = contrast_levels,
+                     labels = c("0%", "3.7%", "4.9%", "6.1%")) +
+  labs(x = "Contrast level", y = "C",
+       title    = "Criterion C for detect task  (separate panels)",
+       subtitle = "Gray = individual, Black = group mean ± SE") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.text       = element_text(size = 14, face = "bold"),
+        plot.title       = element_text(face = "bold"))
+
+# --- 図2: overlay ---
+criterion_plot_overlay <- ggplot() +
+  geom_line(data  = criterion_df,
+            aes(x = contrast, y = criterion, group = interaction(sub, condition),
+                color = condition),
+            linewidth = 0.5, alpha = 0.4) +
+  geom_point(data = criterion_df,
+             aes(x = contrast, y = criterion, color = condition),
+             size = 1.5, alpha = 0.4) +
+  geom_errorbar(data = criterion_group,
+                aes(x = contrast, ymin = mean_c - se_c, ymax = mean_c + se_c,
+                    color = condition),
+                width = 0.15, linewidth = 0.9,
+                position = position_dodge(width = 0.2)) +
+  geom_line(data  = criterion_group,
+            aes(x = contrast, y = mean_c, color = condition),
+            linewidth = 1.5,
+            position = position_dodge(width = 0.2)) +
+  geom_point(data = criterion_group,
+             aes(x = contrast, y = mean_c, color = condition),
+             size = 4,
+             position = position_dodge(width = 0.2)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_color_manual(values = col_condition, name = "Condition") +
+  scale_x_continuous(breaks = contrast_levels,
+                     labels = c("0%", "3.7%", "4.9%", "6.1%")) +
+  labs(x = "Contrast level", y = "C",
+       title    = "Criterion C for detect task  (overlaid)",
+       subtitle = "Thin = individual, Thick = group mean ± SE") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position  = "bottom",
+        plot.title       = element_text(face = "bold"))
+
+plot(criterion_plot_sep)
+plot(criterion_plot_overlay)
+ggsave(file = "criterion_separate.png", plot = criterion_plot_sep,
+       dpi = 150, width = 10, height = 5)
+ggsave(file = "criterion_overlay.png",  plot = criterion_plot_overlay,
+       dpi = 150, width = 6,  height = 5)
+
+# --- 図3: 参加者ごとのoverlay ---
+criterion_plot_dir <- file.path(plot_dir, "criterion")
+dir.create(criterion_plot_dir, showWarnings = FALSE)
+
+for (i in seq_along(participants)) {
+  pid <- participants[i]
+  
+  c_i <- criterion_df %>% filter(sub == i)
+  
+  p_c_i <- ggplot(c_i, aes(x = contrast, y = criterion, color = condition)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 3) +
+    scale_color_manual(values = col_condition, name = "Condition") +
+    scale_x_continuous(breaks = contrast_levels,
+                       labels = c("0%", "3.7%", "4.9%", "6.1%")) +
+    labs(x = "Contrast level", y = "C",
+         title = paste0("Participant ", pid, "  |  Criterion C (detect task)")) +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position  = "bottom",
+          plot.title       = element_text(face = "bold"))
+  
+  ggsave(file.path(criterion_plot_dir, sprintf("P%02d_criterion.png", pid)),
+         plot = p_c_i, dpi = 150, width = 5, height = 4)
+}
+cat("Individual criterion plots saved to:", criterion_plot_dir, "\n")
