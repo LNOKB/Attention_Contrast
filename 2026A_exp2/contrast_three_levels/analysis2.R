@@ -4,22 +4,34 @@ library(effectsize)
 library(plotly)
 library(viridis)
 
+# ============================================================
+### Pre-processing
+# ============================================================
 dat <- read_csv("2026A_exp2_merged.csv")
 
-# detect
-result = dat %>%
+# detect 
+result_detect = dat %>%
   filter(detectorcomp %in% c(0)) %>%
   #filter(detectorcomp %in% c(0), outframe < 7) %>%
   select(
-    validity, detectorcomp, contrastCW, contrastCCW, precueCWorCCW, oriCW, oriCCW, 
-    outframe, probedcontrast, respdetect, relevantContrast, correctDetect, TorFdetect,
-    respCWorCCW, key_resp.keys, participantNo, blockNo
+    validity, contrastCW, contrastCCW, precueCWorCCW, oriCW, oriCCW, 
+    outframe, respdetect, relevantContrast, correctDetect, TorFdetect,
+    participantNo, blockNo
   ) %>%    
   group_by(participantNo, validity, relevantContrast) %>%                
   summarize(detect_rate = mean(respdetect), .groups = "drop")
 
+n <- length(unique(result_detect$participantNo))
+detect_summary = result_detect %>%
+  group_by(validity, relevantContrast) %>%
+  summarise(
+    mean_detect = mean(detect_rate),
+    se_detect   = sd(detect_rate) / sqrt(n()),
+    .groups = "drop"
+  )
+
 # comparison
-result2 = dat %>%             
+result_comp = dat %>%             
   filter(detectorcomp %in% c(1)) %>%
   #filter(detectorcomp %in% c(1), outframe < 7) %>%
   select(
@@ -29,19 +41,25 @@ result2 = dat %>%
   group_by(participantNo, precueCWorCCW, contrastCW, contrastCCW) %>%                
   summarize(CCW_choice_rate = mean(respCWorCCW), .groups = "drop")
 
+# n <- length(unique(result_detect$participantNo))
+# detect_summary = result_detect %>%
+#   group_by(validity, relevantContrast) %>%
+#   summarise(
+#     mean_detect = mean(detect_rate),
+#     se_detect   = sd(detect_rate) / sqrt(n()),
+#     .groups = "drop"
+#   )
+
 # fixed parameters
 sigma_attended <- 1
 mu_attended_0  <- 0
 
-# contrast値 → muインデックス対応
 contrast_to_idx <- c("0" = 1, "3.7" = 2, "4.9" = 3, "6.1" = 4)
 
-n <- length(unique(result$participantNo))
-
 # ============================================================
-### Likelihood function（detect + comp 合算）
+### Likelihood function
 # ============================================================
-PFCI_logL <- function(x, data_detect, data_comp) {
+calculate_logL <- function(x, data_detect, data_comp) {
   
   mu_attended_3.7   <- x[1]
   mu_attended_4.9   <- x[2]
@@ -50,31 +68,33 @@ PFCI_logL <- function(x, data_detect, data_comp) {
   sigma_unattended  <- x[5]
   theta_detect      <- x[6]
   theta_comp        <- x[7]
-  # theta_comp = 0 固定
-  
+
   mus_attended   <- c(mu_attended_0, mu_attended_3.7, mu_attended_4.9, mu_attended_6.1)
   mus_unattended <- mus_attended * lambda_unattended
   
   # ---------- detect logL ----------
-  pred_detect <- matrix(NA, nrow = 8, ncol = 2)
-  for (cond in 1:4) {
-    pred_detect[cond, 1] <- pnorm(theta_detect, mean = mus_unattended[cond], sd = sigma_unattended,
-                                  lower.tail = FALSE)
-    pred_detect[cond, 2] <- 1 - pred_detect[cond, 1]
+  pred_yes <- numeric(nrow(data_detect))
+  for (row in 1:nrow(data_detect)) {
+    relevantContrast  <- as.character(data_detect$relevantContrast[row])
+    validity <- data_detect$validity[row]
+    idx_rel  <- contrast_to_idx[relevantContrast]
+
+    if (validity == 0) {
+      # invalid
+      mu <- mus_unattended[idx_rel]; sigma <- sigma_unattended
+    } else {
+      # valid
+      mu <- mus_attended[idx_rel]; sigma <- sigma_attended
+    }
+    
+    pred_yes[row] <- pnorm(theta_detect, mean = mu, sd = sigma, lower.tail = FALSE)
   }
-  for (cond in 5:8) {
-    pred_detect[cond, 1] <- pnorm(theta_detect, mean = mus_attended[cond - 4], sd = sigma_attended,
-                                  lower.tail = FALSE)
-    pred_detect[cond, 2] <- 1 - pred_detect[cond, 1]
-  }
-  pred_detect  <- pmax(pmin(pred_detect, 1 - 1e-10), 1e-10)  # 0,1を防ぐ
-  obs_yes      <- data_detect[, 1]
-  obs_no       <- data_detect[, 2]
-  logL_detect  <- sum(obs_yes * log(pred_detect[, 1]) + obs_no * log(pred_detect[, 2]))
+  pred_yes <- pmax(pmin(pred_yes, 1 - 1e-10), 1e-10)
+  obs_yes   <- data_detect$detect_rate
+  logL_detect <- sum(obs_yes * log(pred_yes) + (1 - obs_yes) * log(1 - pred_yes))
   
   # ---------- comp logL ----------
-  pred_comp <- numeric(nrow(data_comp))
-  
+  pred_ccw <- numeric(nrow(data_comp))
   for (row in 1:nrow(data_comp)) {
     cw_contrast  <- as.character(data_comp$contrastCW[row])
     ccw_contrast <- as.character(data_comp$contrastCCW[row])
@@ -92,19 +112,18 @@ PFCI_logL <- function(x, data_detect, data_comp) {
       mu_cw  <- mus_unattended[idx_cw]; sd_cw  <- sigma_unattended
       mu_ccw <- mus_attended[idx_ccw];  sd_ccw <- sigma_attended
     }
-    
     # P(choose CCW) = P(X_CCW - X_CW > theta_comp)
     mu_diff  <- mu_ccw - mu_cw
     sd_diff  <- sqrt(sd_cw^2 + sd_ccw^2)
-    pred_comp[row] <- pnorm(theta_comp, mean = mu_diff, sd = sd_diff, lower.tail = FALSE)
+    pred_ccw[row] <- pnorm(theta_comp, mean = mu_diff, sd = sd_diff, lower.tail = FALSE)
   }
-  
-  pred_comp <- pmax(pmin(pred_comp, 1 - 1e-10), 1e-10)
+  pred_ccw <- pmax(pmin(pred_ccw, 1 - 1e-10), 1e-10)
   obs_ccw   <- data_comp$CCW_choice_rate
-  logL_comp <- sum(obs_ccw * log(pred_comp) + (1 - obs_ccw) * log(1 - pred_comp))
+  logL_comp <- sum(obs_ccw * log(pred_ccw) + (1 - obs_ccw) * log(1 - pred_ccw))
   
-  global_pred_detect <<- pred_detect
-  global_pred_comp   <<- pred_comp
+  # ---------- sum of logL ----------
+  global_pred_yes <<- pred_yes 
+  global_pred_ccw   <<- pred_ccw
   
   logL_total <- logL_detect + logL_comp
   if (!is.finite(logL_total)) logL_total <- -1e10
@@ -114,9 +133,11 @@ PFCI_logL <- function(x, data_detect, data_comp) {
 # ============================================================
 ### Fitting function
 # ============================================================
-fit_PFCI_mle <- function(data_detect, data_comp, add_constant = TRUE) {
+fit_mle <- function(data_detect, data_comp, add_constant = TRUE) {
   if (add_constant) {
-    data_detect <- data_detect + 0.5
+    #data_detect <- data_detect + 0.5
+    data_detect$detect_rate <- pmax(pmin(data_detect$detect_rate, 1 - 1e-10), 1e-10)
+    data_comp$CCW_choice_rate <- pmax(pmin(data_comp$CCW_choice_rate, 1 - 1e-10), 1e-10)
   }
   
   guess        <- c(1, 2, 3, 1, 1, 2, 0)            
@@ -126,7 +147,7 @@ fit_PFCI_mle <- function(data_detect, data_comp, add_constant = TRUE) {
   fit <- suppressWarnings(
     optim(
       par         = guess,
-      fn          = PFCI_logL,
+      fn          = calculate_logL,
       data_detect = data_detect,
       data_comp   = data_comp,
       lower       = lower_bounds,
@@ -146,55 +167,36 @@ fit_PFCI_mle <- function(data_detect, data_comp, add_constant = TRUE) {
     theta_comp        = fit$par[7],
     logL              = fit$value
   )
-  return(list(est, global_pred_detect, global_pred_comp))
+  return(list(est, global_pred_yes, global_pred_ccw))
 }
 
 # ============================================================
-### Conducting fitting on individual data
+### Fitting for individual data
 # ============================================================
 estimates         <- c()
-predicted_array   <- array(NA, dim = c(8, 2, n))
-data_rate_array   <- array(NA, dim = c(8, 2, n))
-pred_comp_list    <- vector("list", n)
-
-participants <- sort(unique(result$participantNo))
+pred_yes_list    <- vector("list", n)
+pred_ccw_list    <- vector("list", n)
+participants <- sort(unique(result_detect$participantNo))
 
 for (i in seq_along(participants)) {
   pid <- participants[i]
+  data_detect <- result_detect[result_detect$participantNo == pid, ]
+  data_comp <- result_comp[result_comp$participantNo == pid, ]
   
-  # detectデータ（8行 × 2列）
-  subdata_detect <- result[result$participantNo == pid, ]
-  yes_rate    <- subdata_detect$detect_rate
-  data_detect <- cbind(yes_rate, 1 - yes_rate)
-  data_rate_array[, , i] <- data_detect
-  
-  # compデータ（32行のdata.frame）
-  data_comp <- result2[result2$participantNo == pid, ]
-  
-  # fitting
-  fit <- fit_PFCI_mle(data_detect, data_comp, add_constant = TRUE)
+  fit <- fit_mle(data_detect, data_comp, add_constant = TRUE)
   df  <- fit[[1]]
   df$sub <- i
-  estimates            <- rbind(estimates, df)
-  predicted_array[, , i] <- fit[[2]]
-  pred_comp_list[[i]]  <- fit[[3]]
-  
+  estimates <- rbind(estimates, df)
+  pred_yes_list[[i]]  <- fit[[2]]
+  pred_ccw_list[[i]]  <- fit[[3]]
   cat("Participant", pid, "done\n")
 }
 
-# ============================================================
-### Preparation for data visualization
-# ============================================================
-mean_predicted <- apply(predicted_array, c(1, 2), mean) * 100
-mean_data      <- apply(data_rate_array, c(1, 2), mean) * 100
-se_data        <- apply(data_rate_array, c(1, 2), sd)   * 100 / sqrt(n)
-
-mean_predicted2 <- mean_predicted[, 1]
-mean_data2      <- mean_data[, 1]
-se_data2        <- se_data[, 1]
+pred_yes_mat <- do.call(cbind, pred_yes_list) 
+pred_ccw_mat <- do.call(cbind, pred_ccw_list) 
 
 # ============================================================
-### t-test, lambda
+### t-test
 # ============================================================
 lambda_log <- log(estimates[, 4])
 t_test_below_lambda <- t.test(lambda_log, mu = 0, alternative = "less")
@@ -239,81 +241,6 @@ parameters_graph <- ggplot(data_parameter_plot, aes(x = Parameters, y = Value)) 
   )
 plot(parameters_graph)
 ggsave(file = "parameters_graph.png", plot = parameters_graph, dpi = 150, width = 12, height = 6)
-
-# ============================================================
-### Individual participant plots
-# ============================================================
-plot_dir <- "plots_individual"
-dir.create(plot_dir, showWarnings = FALSE)
-
-for (i in seq_along(participants)) {
-  pid <- participants[i]
-  
-  # --- detect ---
-  detect_i <- data.frame(
-    Imagetype  = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
-                        levels = c("0%", "3.7%", "4.9%", "6.1%")),
-    Observed   = c(data_rate_array[1:4, 1, i], data_rate_array[5:8, 1, i]) * 100,
-    Predicted  = c(predicted_array[1:4, 1, i], predicted_array[5:8, 1, i]) * 100,
-    Condition  = factor(c(rep("unattended", 4), rep("attended", 4)),
-                        levels = c("attended", "unattended"))
-  )
-  
-  p_detect_i <- ggplot(detect_i, aes(x = Imagetype, y = Observed)) +
-    geom_bar(stat = "identity") +
-    geom_point(aes(y = Predicted), color = "red", size = 3) +
-    facet_grid(. ~ Condition) +
-    scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 100)) +
-    labs(title = paste0("P", pid, "  |  Detect"),
-         x = NULL, y = "Detection rate (%)") +
-    theme_classic() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  # --- comp ---
-  comp_i <- comp_pred_df %>%
-    filter(participantNo == pid) %>%
-    mutate(
-      precue_label = factor(
-        ifelse(precueCWorCCW == 0,
-               "Attended: CW  (CCW unattended)",
-               "Attended: CCW  (CW unattended)"),
-        levels = c("Attended: CW  (CCW unattended)",
-                   "Attended: CCW  (CW unattended)")
-      ),
-      cw_label = factor(paste0("CW = ", contrastCW),
-                        levels = paste0("CW = ", c(0, 3.7, 4.9, 6.1))),
-      obs_pct  = CCW_choice_rate * 100,
-      pred_pct = pred_CCW * 100
-    )
-  
-  p_comp_i <- ggplot(comp_i, aes(x = contrastCCW, color = precue_label)) +
-    geom_vline(aes(xintercept = contrastCW),
-               linetype = "dotted", color = "gray40", linewidth = 0.8) +
-    geom_line(aes(y = pred_pct), linewidth = 0.8, alpha = 0.4) +
-    geom_point(aes(y = pred_pct), size = 2.5, shape = 17, alpha = 0.4) +
-    geom_line(aes(y = obs_pct), linewidth = 1.2) +
-    geom_point(aes(y = obs_pct), size = 3) +
-    facet_wrap(~ cw_label, nrow = 1) +
-    scale_color_manual(
-      values = c("Attended: CW  (CCW unattended)"  = "#377eb8",
-                 "Attended: CCW  (CW unattended)"  = "#e41a1c"),
-      name = "Condition"
-    ) +
-    scale_y_continuous(limits = c(-5, 105), breaks = seq(0, 100, 20)) +
-    labs(title = paste0("P", pid, "  |  Comp  (solid=obs, transparent=pred)"),
-         x = "contrastCCW", y = "CCW Choice Rate (%)") +
-    theme_bw(base_size = 11) +
-    theme(panel.grid    = element_blank(),
-          strip.text    = element_text(size = 9),
-          legend.position = "bottom")
-  
-  ggsave(file.path(plot_dir, sprintf("P%02d_detect.png", pid)),
-         plot = p_detect_i, width = 8,  height = 5, dpi = 150)
-  ggsave(file.path(plot_dir, sprintf("P%02d_comp.png",   pid)),
-         plot = p_comp_i,   width = 14, height = 7, dpi = 150)
-  
-  cat("Individual plots saved: P", pid, "\n")
-}
 
 # ============================================================
 ### Estimated distribution
@@ -376,43 +303,33 @@ colors <- viridis(4, option = "plasma")
 plot_sdt_distributions(means, sds, attention_levels, image_types, colors)
 
 # ============================================================
-### Model prediction bar graph (detect)
+### Model prediction bar graph (detect)ここまで終わった（折れ線にする作業はまだ）
 # ============================================================
-data_bar <- data.frame(
-  Imagetype = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
-                     levels = c("0%", "3.7%", "4.9%", "6.1%")),
-  Proportion = as.vector(t(mean_data2)),
-  SE         = as.vector(t(se_data2)),
-  Condition  = factor(c(rep("attended", 4), rep("unattended", 4)),
+mean_pred_yes <- apply(pred_yes_mat, 1, mean) * 100
+sd_pred_yes   <- apply(pred_yes_mat, 1, sd) * 100
+se_pred_yes   <- sd_pred_yes / sqrt(n)
+
+# --- detect ---
+detect <- data.frame(
+  Imagetype  = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
+                      levels = c("0%", "3.7%", "4.9%", "6.1%")),
+  Observed   = detect_summary$mean_detect * 100,
+  Predicted  = mean_pred_yes,
+  Condition  = factor(c(rep("unattended", 4), rep("attended", 4)),
                       levels = c("attended", "unattended"))
 )
 
-predicted_data_bar <- data.frame(
-  Imagetype = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
-                     levels = c("0%", "3.7%", "4.9%", "6.1%")),
-  Predicted = as.vector(t(mean_predicted2)),
-  Condition = factor(c(rep("attended", 4), rep("unattended", 4)),
-                     levels = c("attended", "unattended"))
-)
-
-bar_graph <- ggplot(data_bar, aes(x = Imagetype, y = Proportion)) +
+p_detect <- ggplot(detect, aes(x = Imagetype, y = Observed)) +
   geom_bar(stat = "identity") +
+  geom_point(aes(y = Predicted), color = "red", size = 3) +
+  facet_grid(. ~ Condition) +
+  scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 100)) +
   labs(x = NULL, y = "Detection rate (%)") +
-  facet_grid(. ~ Condition) +  
-  geom_point(data = predicted_data_bar, aes(x = Imagetype, y = Predicted),
-             color = "red", size = 3) +  
-  geom_errorbar(aes(ymin = Proportion - SE, ymax = Proportion + SE), width = 0.2) + 
   theme_classic() +
-  theme(
-    axis.text.x  = element_text(size = 24, angle = 45, hjust = 1, color = "black"),   
-    axis.text.y  = element_text(size = 22),    
-    axis.title.y = element_text(size = 28),
-    strip.text   = element_text(size = 36)
-  ) +
-  scale_y_continuous(breaks = seq(0, 100, by = 20), limits = c(0, 100)) 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-plot(bar_graph)
-ggsave(file = "bar_graph.png", plot = bar_graph, dpi = 150, width = 14, height = 8)
+plot(p_detect)
+ggsave(file = "detect.png", plot = p_detect, dpi = 150, width = 14, height = 8)
 
 # ============================================================
 ### Model prediction graph (comp)
@@ -421,7 +338,7 @@ ggsave(file = "bar_graph.png", plot = bar_graph, dpi = 150, width = 14, height =
 # pred_comp_list から参加者×条件のデータフレームを作成
 comp_pred_df <- do.call(rbind, lapply(seq_along(participants), function(i) {
   pid       <- participants[i]
-  data_comp <- result2[result2$participantNo == pid, ]
+  data_comp <- result_comp[result_comp$participantNo == pid, ]
   data_comp$pred_CCW <- pred_comp_list[[i]]
   data_comp$participantNo <- pid
   data_comp
@@ -494,6 +411,86 @@ plot(comp_graph)
 ggsave(file = "comp_graph.png", plot = comp_graph,
        dpi = 150, width = 14, height = 7)
 
+
+# ============================================================
+### Individual participant plots
+# ============================================================
+plot_dir <- "plots_individual"
+dir.create(plot_dir, showWarnings = FALSE)
+
+for (i in seq_along(participants)) {
+  pid <- participants[i]
+  data_detect <- result_detect[result_detect$participantNo == pid, ]
+  data_comp <- result_comp[result_comp$participantNo == pid, ]
+  
+  # --- detect ---
+  detect_i <- data.frame(
+    Imagetype  = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
+                        levels = c("0%", "3.7%", "4.9%", "6.1%")),
+    Observed   = result_detect[result_detect$participantNo == pid, 
+                               "detect_rate", drop = TRUE] * 100,
+    Predicted  = pred_yes_mat[, i] * 100,
+    Condition  = factor(c(rep("unattended", 4), rep("attended", 4)),
+                        levels = c("attended", "unattended"))
+  )
+  
+  p_detect_i <- ggplot(detect_i, aes(x = Imagetype, y = Observed)) +
+    geom_bar(stat = "identity") +
+    geom_point(aes(y = Predicted), color = "red", size = 3) +
+    facet_grid(. ~ Condition) +
+    scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 100)) +
+    labs(title = paste0("P", pid, "  |  Detect"),
+         x = NULL, y = "Detection rate (%)") +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # # --- comp ---
+  # comp_i <- comp_pred_df %>%
+  #   filter(participantNo == pid) %>%
+  #   mutate(
+  #     precue_label = factor(
+  #       ifelse(precueCWorCCW == 0,
+  #              "Attended: CW  (CCW unattended)",
+  #              "Attended: CCW  (CW unattended)"),
+  #       levels = c("Attended: CW  (CCW unattended)",
+  #                  "Attended: CCW  (CW unattended)")
+  #     ),
+  #     cw_label = factor(paste0("CW = ", contrastCW),
+  #                       levels = paste0("CW = ", c(0, 3.7, 4.9, 6.1))),
+  #     obs_pct  = CCW_choice_rate * 100,
+  #     pred_pct = pred_CCW * 100
+  #   )
+  # 
+  # p_comp_i <- ggplot(comp_i, aes(x = contrastCCW, color = precue_label)) +
+  #   geom_vline(aes(xintercept = contrastCW),
+  #              linetype = "dotted", color = "gray40", linewidth = 0.8) +
+  #   geom_line(aes(y = pred_pct), linewidth = 0.8, alpha = 0.4) +
+  #   geom_point(aes(y = pred_pct), size = 2.5, shape = 17, alpha = 0.4) +
+  #   geom_line(aes(y = obs_pct), linewidth = 1.2) +
+  #   geom_point(aes(y = obs_pct), size = 3) +
+  #   facet_wrap(~ cw_label, nrow = 1) +
+  #   scale_color_manual(
+  #     values = c("Attended: CW  (CCW unattended)"  = "#377eb8",
+  #                "Attended: CCW  (CW unattended)"  = "#e41a1c"),
+  #     name = "Condition"
+  #   ) +
+  #   scale_y_continuous(limits = c(-5, 105), breaks = seq(0, 100, 20)) +
+  #   labs(title = paste0("P", pid, "  |  Comp  (solid=obs, transparent=pred)"),
+  #        x = "contrastCCW", y = "CCW Choice Rate (%)") +
+  #   theme_bw(base_size = 11) +
+  #   theme(panel.grid    = element_blank(),
+  #         strip.text    = element_text(size = 9),
+  #         legend.position = "bottom")
+  # 
+  ggsave(file.path(plot_dir, sprintf("P%02d_detect.png", pid)),
+         plot = p_detect_i, width = 8,  height = 5, dpi = 150)
+  # ggsave(file.path(plot_dir, sprintf("P%02d_comp.png",   pid)),
+  #        plot = p_comp_i,   width = 14, height = 7, dpi = 150)
+  
+  cat("Individual plots saved: P", pid, "\n")
+}
+
+
 # ============================================================
 ### d' plot for detect task
 # ============================================================
@@ -503,15 +500,15 @@ contrast_levels <- c(0, 3.7, 4.9, 6.1)
 dprime_df <- estimates %>%
   mutate(
     # attended: (mu_attended - theta_detect) / sigma_attended
-    dp_att_0   = (mu_attended_0             - theta_detect) / sigma_attended,
-    dp_att_3.7 = (mu_attended_3.7           - theta_detect) / sigma_attended,
-    dp_att_4.9 = (mu_attended_4.9           - theta_detect) / sigma_attended,
-    dp_att_6.1 = (mu_attended_6.1           - theta_detect) / sigma_attended,
+    dp_att_0   = (mu_attended_0             - mu_attended_0) / sigma_attended,
+    dp_att_3.7 = (mu_attended_3.7           - mu_attended_0) / sigma_attended,
+    dp_att_4.9 = (mu_attended_4.9           - mu_attended_0) / sigma_attended,
+    dp_att_6.1 = (mu_attended_6.1           - mu_attended_0) / sigma_attended,
     # unattended: (mu_attended * lambda - theta_detect) / sigma_unattended
-    dp_una_0   = (mu_attended_0   * lambda_unattended - theta_detect) / sigma_unattended,
-    dp_una_3.7 = (mu_attended_3.7 * lambda_unattended - theta_detect) / sigma_unattended,
-    dp_una_4.9 = (mu_attended_4.9 * lambda_unattended - theta_detect) / sigma_unattended,
-    dp_una_6.1 = (mu_attended_6.1 * lambda_unattended - theta_detect) / sigma_unattended
+    dp_una_0   = (mu_attended_0   * lambda_unattended - mu_attended_0 * lambda_unattended) / sigma_unattended,
+    dp_una_3.7 = (mu_attended_3.7 * lambda_unattended - mu_attended_0 * lambda_unattended) / sigma_unattended,
+    dp_una_4.9 = (mu_attended_4.9 * lambda_unattended - mu_attended_0 * lambda_unattended) / sigma_unattended,
+    dp_una_6.1 = (mu_attended_6.1 * lambda_unattended - mu_attended_0 * lambda_unattended) / sigma_unattended
   ) %>%
   select(sub, starts_with("dp_")) %>%
   pivot_longer(
@@ -707,110 +704,110 @@ for (i in seq_along(participants)) {
 }
 cat("Individual criterion plots saved to:", criterion_plot_dir, "\n")
 
-# library(patchwork)
-# 
-# # ============================================================
-# ### outframe plot を個人プロットに追加
-# # ============================================================
-# 
-# for (i in seq_along(participants)) {
-#   pid <- participants[i]
-#   
-#   # --- detect の outframe ---
-#   outframe_detect_i <- dat %>%
-#     filter(detectorcomp == 0, participantNo == pid) %>%
-#     count(outframe) %>%
-#     mutate(rate = n / sum(n) * 100)
-#   
-#   p_outframe_detect <- ggplot(outframe_detect_i, 
-#                               aes(x = factor(outframe), y = rate)) +
-#     geom_bar(stat = "identity", fill = "steelblue") +
-#     labs(x = "outframe", y = "Trial (%)",
-#          title = paste0("P", pid, "  |  Detect: outframe distribution")) +
-#     theme_classic() +
-#     theme(axis.text.x = element_text(angle = 45, hjust = 1))
-#   
-#   # 既存detectプロットを再生成して結合
-#   detect_i <- data.frame(
-#     Imagetype = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
-#                        levels = c("0%", "3.7%", "4.9%", "6.1%")),
-#     Observed  = c(data_rate_array[1:4, 1, i], data_rate_array[5:8, 1, i]) * 100,
-#     Predicted = c(predicted_array[1:4, 1, i], predicted_array[5:8, 1, i]) * 100,
-#     Condition = factor(c(rep("unattended", 4), rep("attended", 4)),
-#                        levels = c("attended", "unattended"))
-#   )
-#   p_detect_i <- ggplot(detect_i, aes(x = Imagetype, y = Observed)) +
-#     geom_bar(stat = "identity") +
-#     geom_point(aes(y = Predicted), color = "red", size = 3) +
-#     facet_grid(. ~ Condition) +
-#     scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 100)) +
-#     labs(title = paste0("P", pid, "  |  Detect"),
-#          x = NULL, y = "Detection rate (%)") +
-#     theme_classic() +
-#     theme(axis.text.x = element_text(angle = 45, hjust = 1))
-#   
-#   p_detect_combined <- p_detect_i / p_outframe_detect +
-#     plot_layout(heights = c(3, 1))
-#   
-#   ggsave(file.path(plot_dir, sprintf("P%02d_detect.png", pid)),
-#          plot = p_detect_combined, width = 8, height = 7, dpi = 150)
-#   
-#   # --- comp の outframe ---
-#   outframe_comp_i <- dat %>%
-#     filter(detectorcomp == 1, participantNo == pid) %>%
-#     count(outframe) %>%
-#     mutate(rate = n / sum(n) * 100)
-#   
-#   p_outframe_comp <- ggplot(outframe_comp_i,
-#                             aes(x = factor(outframe), y = rate)) +
-#     geom_bar(stat = "identity", fill = "steelblue") +
-#     labs(x = "outframe", y = "Trial (%)",
-#          title = paste0("P", pid, "  |  Comp: outframe distribution")) +
-#     theme_classic() +
-#     theme(axis.text.x = element_text(angle = 45, hjust = 1))
-#   
-#   # 既存compプロットを再生成して結合
-#   comp_i <- comp_pred_df %>%
-#     filter(participantNo == pid) %>%
-#     mutate(
-#       precue_label = factor(
-#         ifelse(precueCWorCCW == 0,
-#                "Attended: CW  (CCW unattended)",
-#                "Attended: CCW  (CW unattended)"),
-#         levels = c("Attended: CW  (CCW unattended)",
-#                    "Attended: CCW  (CW unattended)")
-#       ),
-#       cw_label = factor(paste0("CW = ", contrastCW),
-#                         levels = paste0("CW = ", c(0, 3.7, 4.9, 6.1))),
-#       obs_pct  = CCW_choice_rate * 100,
-#       pred_pct = pred_CCW * 100
-#     )
-#   p_comp_i <- ggplot(comp_i, aes(x = contrastCCW, color = precue_label)) +
-#     geom_vline(aes(xintercept = contrastCW),
-#                linetype = "dotted", color = "gray40", linewidth = 0.8) +
-#     geom_line(aes(y = pred_pct), linewidth = 0.8, alpha = 0.4) +
-#     geom_point(aes(y = pred_pct), size = 2.5, shape = 17, alpha = 0.4) +
-#     geom_line(aes(y = obs_pct), linewidth = 1.2) +
-#     geom_point(aes(y = obs_pct), size = 3) +
-#     facet_wrap(~ cw_label, nrow = 1) +
-#     scale_color_manual(
-#       values = c("Attended: CW  (CCW unattended)" = "#377eb8",
-#                  "Attended: CCW  (CW unattended)"  = "#e41a1c"),
-#       name = "Condition"
-#     ) +
-#     scale_y_continuous(limits = c(-5, 105), breaks = seq(0, 100, 20)) +
-#     labs(title = paste0("P", pid, "  |  Comp  (solid=obs, transparent=pred)"),
-#          x = "contrastCCW", y = "CCW Choice Rate (%)") +
-#     theme_bw(base_size = 11) +
-#     theme(panel.grid     = element_blank(),
-#           strip.text     = element_text(size = 9),
-#           legend.position = "bottom")
-#   
-#   p_comp_combined <- p_comp_i / p_outframe_comp +
-#     plot_layout(heights = c(3, 1))
-#   
-#   ggsave(file.path(plot_dir, sprintf("P%02d_comp.png", pid)),
-#          plot = p_comp_combined, width = 14, height = 9, dpi = 150)
-#   
-#   cat("Outframe plots added: P", pid, "\n")
-# }
+library(patchwork)
+
+# ============================================================
+### outframe plot を個人プロットに追加
+# ============================================================
+
+for (i in seq_along(participants)) {
+  pid <- participants[i]
+
+  # --- detect の outframe ---
+  outframe_detect_i <- dat %>%
+    filter(detectorcomp == 0, participantNo == pid) %>%
+    count(outframe) %>%
+    mutate(rate = n / sum(n) * 100)
+
+  p_outframe_detect <- ggplot(outframe_detect_i,
+                              aes(x = factor(outframe), y = rate)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(x = "outframe", y = "Trial (%)",
+         title = paste0("P", pid, "  |  Detect: outframe distribution")) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  # 既存detectプロットを再生成して結合
+  detect_i <- data.frame(
+    Imagetype = factor(rep(c("0%", "3.7%", "4.9%", "6.1%"), 2),
+                       levels = c("0%", "3.7%", "4.9%", "6.1%")),
+    Observed  = c(data_rate_array[1:4, 1, i], data_rate_array[5:8, 1, i]) * 100,
+    Predicted = c(predicted_array[1:4, 1, i], predicted_array[5:8, 1, i]) * 100,
+    Condition = factor(c(rep("unattended", 4), rep("attended", 4)),
+                       levels = c("attended", "unattended"))
+  )
+  p_detect_i <- ggplot(detect_i, aes(x = Imagetype, y = Observed)) +
+    geom_bar(stat = "identity") +
+    geom_point(aes(y = Predicted), color = "red", size = 3) +
+    facet_grid(. ~ Condition) +
+    scale_y_continuous(breaks = seq(0, 100, 20), limits = c(0, 100)) +
+    labs(title = paste0("P", pid, "  |  Detect"),
+         x = NULL, y = "Detection rate (%)") +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  p_detect_combined <- p_detect_i / p_outframe_detect +
+    plot_layout(heights = c(3, 1))
+
+  ggsave(file.path(plot_dir, sprintf("P%02d_detect.png", pid)),
+         plot = p_detect_combined, width = 8, height = 7, dpi = 150)
+
+  # --- comp の outframe ---
+  outframe_comp_i <- dat %>%
+    filter(detectorcomp == 1, participantNo == pid) %>%
+    count(outframe) %>%
+    mutate(rate = n / sum(n) * 100)
+
+  p_outframe_comp <- ggplot(outframe_comp_i,
+                            aes(x = factor(outframe), y = rate)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(x = "outframe", y = "Trial (%)",
+         title = paste0("P", pid, "  |  Comp: outframe distribution")) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+  # 既存compプロットを再生成して結合
+  comp_i <- comp_pred_df %>%
+    filter(participantNo == pid) %>%
+    mutate(
+      precue_label = factor(
+        ifelse(precueCWorCCW == 0,
+               "Attended: CW  (CCW unattended)",
+               "Attended: CCW  (CW unattended)"),
+        levels = c("Attended: CW  (CCW unattended)",
+                   "Attended: CCW  (CW unattended)")
+      ),
+      cw_label = factor(paste0("CW = ", contrastCW),
+                        levels = paste0("CW = ", c(0, 3.7, 4.9, 6.1))),
+      obs_pct  = CCW_choice_rate * 100,
+      pred_pct = pred_CCW * 100
+    )
+  p_comp_i <- ggplot(comp_i, aes(x = contrastCCW, color = precue_label)) +
+    geom_vline(aes(xintercept = contrastCW),
+               linetype = "dotted", color = "gray40", linewidth = 0.8) +
+    geom_line(aes(y = pred_pct), linewidth = 0.8, alpha = 0.4) +
+    geom_point(aes(y = pred_pct), size = 2.5, shape = 17, alpha = 0.4) +
+    geom_line(aes(y = obs_pct), linewidth = 1.2) +
+    geom_point(aes(y = obs_pct), size = 3) +
+    facet_wrap(~ cw_label, nrow = 1) +
+    scale_color_manual(
+      values = c("Attended: CW  (CCW unattended)" = "#377eb8",
+                 "Attended: CCW  (CW unattended)"  = "#e41a1c"),
+      name = "Condition"
+    ) +
+    scale_y_continuous(limits = c(-5, 105), breaks = seq(0, 100, 20)) +
+    labs(title = paste0("P", pid, "  |  Comp  (solid=obs, transparent=pred)"),
+         x = "contrastCCW", y = "CCW Choice Rate (%)") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid     = element_blank(),
+          strip.text     = element_text(size = 9),
+          legend.position = "bottom")
+
+  p_comp_combined <- p_comp_i / p_outframe_comp +
+    plot_layout(heights = c(3, 1))
+
+  ggsave(file.path(plot_dir, sprintf("P%02d_comp.png", pid)),
+         plot = p_comp_combined, width = 14, height = 9, dpi = 150)
+
+  cat("Outframe plots added: P", pid, "\n")
+}
