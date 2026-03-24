@@ -9,38 +9,51 @@ library(viridis)
 # ============================================================
 dat <- read_csv("2026A_exp2_merged.csv")
 
-result_detect = dat %>%
+# ---------- detect ----------
+dat_detect <- dat %>%
   filter(detectorcomp %in% c(0)) %>%
-  #filter(detectorcomp %in% c(0), outframe < 7) %>%
   select(
     validity, contrastCW, contrastCCW, precueCWorCCW, oriCW, oriCCW, 
     outframe, respdetect, relevantContrast, correctDetect, TorFdetect,
     participantNo, blockNo
   ) %>%    
   group_by(participantNo, validity, relevantContrast) %>%                
-  summarize(detect_rate = mean(respdetect), .groups = "drop")
+  summarize(
+    yes_frequency = sum(respdetect),
+    n_trials      = n(),
+    no_frequency  = n_trials - yes_frequency,
+    .groups = "drop"
+  ) %>%
+  mutate(detect_rate = yes_frequency / n_trials)
 
-result_comp = dat %>%             
+# ---------- comp ----------
+dat_comp = dat %>%             
   filter(detectorcomp %in% c(1)) %>%
   #filter(detectorcomp %in% c(1), outframe < 7) %>%
   select(
     contrastCW, contrastCCW, precueCWorCCW, oriCW, oriCCW, 
     outframe, respCWorCCW, participantNo, blockNo
   ) %>%    
-  group_by(participantNo, precueCWorCCW, contrastCW, contrastCCW) %>%                
-  summarize(CCW_choice_rate = mean(respCWorCCW), .groups = "drop")
+  group_by(participantNo, precueCWorCCW, contrastCW, contrastCCW) %>%    
+  summarize(
+    ccw_frequency = sum(respCWorCCW),
+    n_trials      = n(),
+    cw_frequency  = n_trials - ccw_frequency,
+    .groups = "drop"
+  ) %>%
+  mutate(ccw_rate = ccw_frequency / n_trials)
 
 # fixed parameters
 sigma_attended <- 1
 mu_attended_0  <- 0
 
-n <- length(unique(result_detect$participantNo))
+n <- length(unique(dat_detect$participantNo))
 contrast_to_idx <- c("0" = 1, "3.7" = 2, "4.9" = 3, "6.1" = 4)
 
 # ============================================================
 ### Likelihood function
 # ============================================================
-calculate_logL <- function(x, data_detect, data_comp) {
+calculate_logL <- function(x, dat_detect, dat_comp) {
   
   mu_attended_3.7   <- x[1]
   mu_attended_4.9   <- x[2]
@@ -54,10 +67,10 @@ calculate_logL <- function(x, data_detect, data_comp) {
   mus_unattended <- mus_attended * lambda_unattended
   
   # ---------- detect logL ----------
-  pred_yes <- numeric(nrow(data_detect))
-  for (row in 1:nrow(data_detect)) {
-    relevantContrast  <- as.character(data_detect$relevantContrast[row])
-    validity <- data_detect$validity[row]
+  pred_yes <- numeric(nrow(dat_detect))
+  for (row in 1:nrow(dat_detect)) {
+    relevantContrast  <- as.character(dat_detect$relevantContrast[row])
+    validity <- dat_detect$validity[row]
     idx_rel  <- contrast_to_idx[relevantContrast]
 
     if (validity == 0) {
@@ -71,15 +84,16 @@ calculate_logL <- function(x, data_detect, data_comp) {
     pred_yes[row] <- pnorm(theta_detect, mean = mu, sd = sigma, lower.tail = FALSE)
   }
   pred_yes <- pmax(pmin(pred_yes, 1 - 1e-10), 1e-10)
-  obs_yes   <- data_detect$detect_rate
-  logL_detect <- sum(obs_yes * log(pred_yes) + (1 - obs_yes) * log(1 - pred_yes))
+  obs_yes   <- dat_detect$yes_frequency
+  obs_no   <- dat_detect$no_frequency
+  logL_detect <- sum(obs_yes * log(pred_yes) + obs_no * log(1 - pred_yes))
   
   # ---------- comp logL ----------
-  pred_ccw <- numeric(nrow(data_comp))
-  for (row in 1:nrow(data_comp)) {
-    cw_contrast  <- as.character(data_comp$contrastCW[row])
-    ccw_contrast <- as.character(data_comp$contrastCCW[row])
-    precue       <- data_comp$precueCWorCCW[row]
+  pred_ccw <- numeric(nrow(dat_comp))
+  for (row in 1:nrow(dat_comp)) {
+    cw_contrast  <- as.character(dat_comp$contrastCW[row])
+    ccw_contrast <- as.character(dat_comp$contrastCCW[row])
+    precue       <- dat_comp$precueCWorCCW[row]
     
     idx_cw  <- contrast_to_idx[cw_contrast]
     idx_ccw <- contrast_to_idx[ccw_contrast]
@@ -99,8 +113,9 @@ calculate_logL <- function(x, data_detect, data_comp) {
     pred_ccw[row] <- pnorm(theta_comp, mean = mu_diff, sd = sd_diff, lower.tail = FALSE)
   }
   pred_ccw <- pmax(pmin(pred_ccw, 1 - 1e-10), 1e-10)
-  obs_ccw   <- data_comp$CCW_choice_rate
-  logL_comp <- sum(obs_ccw * log(pred_ccw) + (1 - obs_ccw) * log(1 - pred_ccw))
+  obs_ccw <- dat_comp$ccw_frequency
+  obs_cw <- dat_comp$cw_frequency 
+  logL_comp <- sum(obs_ccw * log(pred_ccw) + obs_cw * log(1 - pred_ccw))
   
   # ---------- sum of logL ----------
   global_pred_yes <<- pred_yes 
@@ -114,12 +129,13 @@ calculate_logL <- function(x, data_detect, data_comp) {
 # ============================================================
 ### Fitting function
 # ============================================================
-fit_mle <- function(data_detect, data_comp, add_constant = TRUE) {
+fit_mle <- function(dat_detect, dat_comp, add_constant = TRUE) {
   
-  #0と1の処理の仕方これでOK？
   if (add_constant) {
-    data_detect$detect_rate <- pmax(pmin(data_detect$detect_rate, 1 - 1e-10), 1e-10)
-    data_comp$CCW_choice_rate <- pmax(pmin(data_comp$CCW_choice_rate, 1 - 1e-10), 1e-10)
+    dat_detect$yes_frequency <- dat_detect$yes_frequency + 0.5
+    dat_detect$no_frequency <- dat_detect$no_frequency + 0.5
+    dat_comp$ccw_frequency <- dat_comp$ccw_frequency + 0.5
+    dat_comp$cw_frequency <- dat_comp$cw_frequency + 0.5
   }
   
   guess        <- c(1, 2, 3, 1, 1, 2, 0)            
@@ -130,8 +146,8 @@ fit_mle <- function(data_detect, data_comp, add_constant = TRUE) {
     optim(
       par         = guess,
       fn          = calculate_logL,
-      data_detect = data_detect,
-      data_comp   = data_comp,
+      dat_detect  = dat_detect,
+      dat_comp    = dat_comp,
       lower       = lower_bounds,
       upper       = upper_bounds,
       method      = "L-BFGS-B",
@@ -158,14 +174,15 @@ fit_mle <- function(data_detect, data_comp, add_constant = TRUE) {
 estimates         <- c()
 pred_yes_list    <- vector("list", n)
 pred_ccw_list    <- vector("list", n)
-participants <- sort(unique(result_detect$participantNo))
+participants <- sort(unique(dat_detect$participantNo))
 
 for (i in seq_along(participants)) {
   pid <- participants[i]
-  data_detect <- result_detect[result_detect$participantNo == pid, ]
-  data_comp <- result_comp[result_comp$participantNo == pid, ]
   
-  fit <- fit_mle(data_detect, data_comp, add_constant = TRUE)
+  dat_detect_i <- dat_detect[dat_detect$participantNo == pid, ]
+  dat_comp_i <- dat_comp[dat_comp$participantNo == pid, ]
+
+  fit <- fit_mle(dat_detect_i, dat_comp_i, add_constant = TRUE)
   df  <- fit[[1]]
   df$sub <- i
   estimates <- rbind(estimates, df)
@@ -174,17 +191,17 @@ for (i in seq_along(participants)) {
   cat("Participant", pid, "done\n")
 }
 
-# combining prediction and observation
+# combining prediction and observation ここが変？
 detect_df <- do.call(rbind, lapply(seq_along(participants), function(i) {
   pid       <- participants[i]
-  data_detect <- result_detect[result_detect$participantNo == pid, ]
+  data_detect <- dat_detect[dat_detect$participantNo == pid, ]
   data_detect$pred_yes <- pred_yes_list[[i]]
   data_detect$participantNo <- pid
   data_detect
 }))
 comp_df <- do.call(rbind, lapply(seq_along(participants), function(i) {
   pid       <- participants[i]
-  data_comp <- result_comp[result_comp$participantNo == pid, ]
+  data_comp <- dat_comp[dat_comp$participantNo == pid, ]
   data_comp$pred_CCW <- pred_ccw_list[[i]]
   data_comp$participantNo <- pid
   data_comp
@@ -323,14 +340,14 @@ detect_obs_group <- detect_df %>%
   )
 
 p_detect <- ggplot() +
-  # 予測（薄い色）
+  # prediction
   geom_line(data = detect_obs_group,
             aes(x = Contrast, y = mean_pred, color = Attention, group = Attention),
             linewidth = 0.8, alpha = 0.4) +
   geom_point(data = detect_obs_group,
              aes(x = Contrast, y = mean_pred, color = Attention),
              size = 2.5, shape = 17, alpha = 0.4) +
-  # 観測値（濃い色）
+  # observation
   geom_errorbar(data = detect_obs_group,
                 aes(x = Contrast,
                     ymin = mean_obs - se_obs,
@@ -369,7 +386,7 @@ ggsave(file = "detect.png", plot = p_detect, dpi = 150, width = 7, height = 5)
 comp_obs_group <- comp_df %>%
   group_by(participantNo, precueCWorCCW, contrastCW, contrastCCW) %>%
   summarise(
-    obs  = mean(CCW_choice_rate),
+    obs  = mean(ccw_rate),
     pred = mean(pred_CCW),
     .groups = "drop"
   ) %>%
@@ -383,7 +400,7 @@ comp_obs_group <- comp_df %>%
   mutate(
     precue_label = factor(
       ifelse(precueCWorCCW == 0,
-             "unattended(Cued:CW))",
+             "unattended(Cued:CW)",
              "attended(Cued:CCW)"),
       levels = c("unattended(Cued:CW)",
                  "attended(Cued:CCW)")
@@ -396,12 +413,12 @@ p_comp <- ggplot(comp_obs_group,
                      aes(x = contrastCCW, color = precue_label, fill = precue_label)) +
   geom_vline(aes(xintercept = contrastCW),
              linetype = "dotted", color = "gray40", linewidth = 0.8) +
-  # モデル予測（薄い色）
+  # prediction
   geom_line(aes(y = mean_pred),
             linewidth = 0.8, linetype = "solid", alpha = 0.4) +
   geom_point(aes(y = mean_pred),
              size = 2.5, shape = 17, alpha = 0.4) +
-  # 観測値（濃い色）+ エラーバー
+  # observation
   geom_errorbar(aes(ymin = mean_obs - se_obs, ymax = mean_obs + se_obs),
                 width = 0.15, linewidth = 0.7) +
   geom_line(aes(y = mean_obs), linewidth = 1.2) +
@@ -452,12 +469,12 @@ for (i in seq_along(participants)) {
     )
   
   p_detect_i <- ggplot(detect_i, aes(x = Contrast, color = Attention, group = Attention)) +
-    # 予測（薄い色）
+    # prediction
     geom_line(aes(y = pred_yes * 100),
               linewidth = 0.8, alpha = 0.4) +
     geom_point(aes(y = pred_yes * 100),
                size = 2.5, shape = 17, alpha = 0.4) +
-    # 観測値（濃い色）
+    # observation
     geom_line(aes(y = detect_rate * 100),
               linewidth = 1.2) +
     geom_point(aes(y = detect_rate * 100),
@@ -491,7 +508,7 @@ for (i in seq_along(participants)) {
       ),
       cw_label = factor(paste0("CW = ", contrastCW),
                         levels = paste0("CW = ", c(0, 3.7, 4.9, 6.1))),
-      obs_pct  = CCW_choice_rate * 100,
+      obs_pct  = ccw_rate * 100,
       pred_pct = pred_CCW * 100
     )
 
